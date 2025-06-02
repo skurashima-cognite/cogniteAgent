@@ -1,0 +1,2 @@
+cognite-sdk>=7,<8
+# Add other dependencies here if any are introduced later
