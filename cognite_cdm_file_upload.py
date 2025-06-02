@@ -1,22 +1,23 @@
 import os
 import mimetypes
-from cognite.client import CogniteClient, CogniteClientConfig
+from cognite.client import CogniteClient, ClientConfig
 from cognite.client.credentials import OAuthClientCredentials
-from cognite.client.data_classes import FileMetadata # Added for return type hint
+from cognite.client.data_classes import FileMetadata
 from cognite.client.data_classes.data_modeling import (
+    NodeId,
     SpaceApply,
-    CogniteFileApply,
-    InstanceApply,
-    NodeApplyInfo,
-    NodeId # Added
+    NodeApplyResult
+)
+from cognite.client.data_classes.data_modeling.cdm.v1 import (
+    CogniteFileApply
 )
 from cognite.client.exceptions import CogniteNotFoundError
 
 # --- Placeholder Variables ---
 local_file_path = "./test_file_jules.txt"
 cdm_space = "my_files_space"
-instance_external_id = "my_document_instance_001" # External ID for the CDM instance (node)
-instance_name = "My Document Example" # Name for the CogniteFile source property
+instance_external_id = "my_document_instance_001"
+instance_name = "My Document Example"
 instance_mime_type = "text/plain"
 
 # --- Configuration ---
@@ -28,30 +29,15 @@ COGNITE_CLIENT_SECRET = os.getenv("COGNITE_CLIENT_SECRET")
 IDP_SCOPES = [f"https://{CDF_CLUSTER}.cognitedata.com/.default"]
 
 # --- Function to Create CDM File Instance ---
-def create_cdm_file_instance(
+def create_cdm_file_instance( # file_link_external_id parameter removed
     client: CogniteClient,
     space: str,
-    instance_ext_id: str, # Changed from instance_external_id to match new arg name
-    file_content_ext_id: str, # New argument for the file's own external_id
+    external_id: str,
     name: str,
     mime_type: str | None
-) -> NodeApplyInfo | None:
-    """
-    Creates a data modeling instance that includes a CogniteFile source,
-    linking to a file external_id.
-
-    Args:
-        client: Initialized CogniteClient.
-        space: The external ID of the space for the instance.
-        instance_ext_id: The external ID for the new instance (node).
-        file_content_ext_id: The external ID of the actual file content in Files API.
-        name: The name for the CogniteFile source's 'name' property.
-        mime_type: The MIME type of the file. Guesses if None.
-
-    Returns:
-        The NodeApplyInfo of the created instance node, or None if creation fails.
-    """
-    actual_mime_type = mime_type # Renamed from effective_mime_type for clarity
+    # file_link_external_id: str | None # Removed
+) -> NodeApplyResult | None:
+    actual_mime_type = mime_type
     if not actual_mime_type:
         guessed_type, _ = mimetypes.guess_type(local_file_path)
         if guessed_type:
@@ -61,123 +47,97 @@ def create_cdm_file_instance(
             actual_mime_type = 'application/octet-stream'
             print(f"Could not guess MIME type for '{local_file_path}', defaulting to '{actual_mime_type}'.")
 
-    # This CogniteFileApply object describes the 'file' source type and its properties.
-    # It does not have its own external_id or space when used as a source for an InstanceApply.
-    # The 'file_external_id' property within it points to the actual file in CDF Files API.
-    cognite_file_source = CogniteFileApply(
-        file_external_id=file_content_ext_id, # Links to the file in Files API
+    cdm_file_instance = CogniteFileApply(
+        space=space,
+        external_id=external_id,
         name=name,
         mime_type=actual_mime_type
+        # file_external_id removed due to TypeError with CogniteFileApply.__init__ in this SDK version
     )
-
-    # This InstanceApply creates the actual node in the data model.
-    instance_to_apply = InstanceApply(
-        space=space,
-        external_id=instance_ext_id, # The external_id of the node itself
-        sources=[cognite_file_source] # List of sources defining this instance
-    )
-
     try:
-        print(f"Attempting to create CDM instance: space='{space}', external_id='{instance_ext_id}' "
-              f"linking to file_external_id='{file_content_ext_id}'...")
-        result = client.data_modeling.instances.apply(nodes=instance_to_apply)
-
+        # Print message adjusted as file_link_external_id is not used in constructor
+        print(f"Attempting to create CDM instance (CogniteFile type): space='{space}', external_id='{external_id}'...")
+        result = client.data_modeling.instances.apply(nodes=[cdm_file_instance])
         if result and result.nodes:
             created_node_info = result.nodes[0]
-            print(f"Successfully created CDM instance: space='{created_node_info.space}', "
-                  f"external_id='{created_node_info.external_id}', version='{created_node_info.version}'")
+            # Print message adjusted
+            print(f"Successfully created CDM instance (CogniteFile type): space='{created_node_info.space}', "
+                  f"external_id='{created_node_info.external_id}', version='{created_node_info.version}'.")
             return created_node_info
         else:
-            print(f"CDM instance creation for '{instance_ext_id}' did not return expected results.")
+            print(f"CDM instance creation for '{external_id}' did not return expected results.")
             return None
-
     except Exception as e:
-        print(f"Error creating CDM instance '{instance_ext_id}': {e}")
+        print(f"Error creating CDM instance (CogniteFile type) '{external_id}': {e}")
         return None
 
 # --- Function to Upload File Content and Link to CDM Instance ---
-def upload_file_content_to_cdm_instance(
+def upload_file_content_to_cdm_instance( # Signature updated
     client: CogniteClient,
     local_path: str,
-    file_content_ext_id: str,
+    # file_content_ext_id: str, # Removed
     cdm_instance_space: str,
-    cdm_instance_external_id: str,
-    mime_type: str | None
+    cdm_instance_external_id: str
+    # mime_type: str | None # Removed
 ) -> FileMetadata | None:
-    """
-    Uploads file content to Cognite Files API and links it to a CDM instance node.
-
-    Args:
-        client: Initialized CogniteClient.
-        local_path: Path to the local file to upload.
-        file_content_ext_id: External ID for the file object itself in CDF Files.
-        cdm_instance_space: Space of the CDM instance to link to.
-        cdm_instance_external_id: External ID of the CDM instance to link to.
-        mime_type: MIME type of the file.
-
-    Returns:
-        FileMetadata object of the uploaded file, or None if upload fails.
-    """
-    actual_mime_type = mime_type
-    if not actual_mime_type: # Guess MIME type if not provided, similar to instance creation
-        guessed_type, _ = mimetypes.guess_type(local_path)
-        if guessed_type:
-            actual_mime_type = guessed_type
-        else:
-            actual_mime_type = 'application/octet-stream'
-
+    # actual_mime_type logic removed as mime_type is no longer a parameter and upload_content infers it,
+    # and it was not used by the upload_content call anyway.
     try:
-        print(f"Attempting to upload file '{local_path}' with external_id='{file_content_ext_id}'...")
-        with open(local_path, 'rb') as f_content:
-            file_bytes = f_content.read()
+        # file_content_ext_id is no longer used for pre-deletion or explicit setting.
+        print(f"Attempting to upload file content from '{local_path}' and link with instance_id...")
 
-        # Note: The SDK's `source_id` parameter for files.upload_bytes expects a data modeling ID (NodeId).
-        # This creates the link between the file in the Files API and the CDM Node.
-        uploaded_file_metadata = client.files.upload_bytes(
-            content=file_bytes,
-            external_id=file_content_ext_id,
-            mime_type=actual_mime_type,
-            source_id=NodeId(space=cdm_instance_space, external_id=cdm_instance_external_id)
-            # data_set_id can also be set here if needed
+        uploaded_file_metadata = client.files.upload_content(
+            path=local_path,
+            instance_id=NodeId(space=cdm_instance_space, external_id=cdm_instance_external_id)
+            # external_id for the file is now auto-generated by CDF.
+            # name and mime_type are inferred by CDF from the path/content.
         )
-        print(f"Successfully uploaded file: external_id='{uploaded_file_metadata.external_id}', "
-              f"name='{uploaded_file_metadata.name}'. Linked to CDM instance: "
-              f"space='{cdm_instance_space}', external_id='{cdm_instance_external_id}'.")
+        # Print statement updated to reflect that external_id and name are from the response.
+        print(f"Successfully uploaded file: CDF-assigned external_id='{uploaded_file_metadata.external_id}', name='{uploaded_file_metadata.name}'. "
+              f"Attempted link to CDM instance: space='{cdm_instance_space}', external_id='{cdm_instance_external_id}' using instance_id.")
         return uploaded_file_metadata
     except FileNotFoundError:
         print(f"Error: Local file not found at '{local_path}'.")
         return None
     except Exception as e:
-        print(f"Error uploading file '{local_path}' (ext_id: {file_content_ext_id}): {e}")
+        # file_content_ext_id removed from this print statement
+        print(f"Error uploading file '{local_path}': {e}")
         return None
 
-# --- Function to Ensure Space Exists ---
-# (definition remains unchanged from previous step)
+# --- Function to Ensure Space Exists (Restored to retrieve-then-create) ---
 def ensure_space_exists(client: CogniteClient, space_external_id: str) -> bool:
+    """
+    Checks if a data modeling space exists. If not, it creates it.
+    Returns True if the space was newly created, False otherwise.
+    """
     try:
-        client.data_modeling.spaces.retrieve(space=space_external_id)
-        print(f"Data modeling space '{space_external_id}' already exists.")
-        return False
-    except CogniteNotFoundError:
-        print(f"Data modeling space '{space_external_id}' not found. Creating it...")
-        try:
-            new_space = SpaceApply(
-                space=space_external_id,
-                name=f"{space_external_id.replace('_', ' ').title()} Space",
-                description=f"Space for {space_external_id} data models and instances."
-            )
-            client.data_modeling.spaces.apply(space=new_space)
-            print(f"Data modeling space '{space_external_id}' created successfully.")
-            return True
-        except Exception as e_create:
-            print(f"Error creating data modeling space '{space_external_id}': {e_create}")
-            return False
+        retrieved_space = client.data_modeling.spaces.retrieve(space_external_id) # Positional argument
+        if retrieved_space:
+            # A retrieved Space object has 'space' (its ID/externalID), 'description', 'last_updated_time', 'created_time'.
+            # It does not have a 'name' attribute after retrieval.
+            print(f"Data modeling space '{space_external_id}' already exists (Actual ID: {retrieved_space.space}, Description: {retrieved_space.description}).")
+            return False # Not newly created
+        else: # Space does not exist (retrieve returned None)
+            print(f"Data modeling space '{space_external_id}' not found. Creating it...")
+            try:
+                new_space = SpaceApply(
+                    space=space_external_id,
+                    # The 'name' attribute for SpaceApply is used for a more descriptive name if desired,
+                    # but is not a property on the retrieved Space object itself.
+                    name=f"{space_external_id.replace('_', ' ').title()} Space",
+                    description=f"Space for {space_external_id} data models and instances."
+                )
+                client.data_modeling.spaces.apply(new_space) # Positional argument
+                print(f"Data modeling space '{space_external_id}' created successfully.")
+                return True # Newly created
+            except Exception as e_create:
+                print(f"Error creating data modeling space '{space_external_id}': {e_create}")
+                return False
     except Exception as e_retrieve:
-        print(f"Error retrieving data modeling space '{space_external_id}': {e_retrieve}")
+        print(f"An error occurred while trying to retrieve or process space '{space_external_id}': {e_retrieve}")
         return False
 
 # --- Helper Functions ---
-# (get_cognite_client remains unchanged)
 def get_cognite_client() -> CogniteClient | None:
     if not all([COGNITE_PROJECT, COGNITE_TENANT_ID, COGNITE_CLIENT_ID, COGNITE_CLIENT_SECRET]):
         print("Error: Missing one or more Cognite credentials environment variables.")
@@ -189,7 +149,7 @@ def get_cognite_client() -> CogniteClient | None:
         client_secret=COGNITE_CLIENT_SECRET,
         scopes=IDP_SCOPES,
     )
-    cnf = CogniteClientConfig(
+    cnf = ClientConfig(
         client_name="cognite-cdm-file-uploader-simplified",
         project=COGNITE_PROJECT,
         base_url=f"https://{CDF_CLUSTER}.cognitedata.com",
@@ -212,42 +172,46 @@ if __name__ == "__main__":
         print("Cognite client initialized successfully.")
 
         print(f"\nChecking/Ensuring data modeling space '{cdm_space}' exists...")
-        ensure_space_exists(cognite_client, cdm_space) # Call it, but no need to check 'space_was_created' for subsequent logic
+        space_newly_created = ensure_space_exists(cognite_client, cdm_space)
+        if space_newly_created:
+            print(f"Space '{cdm_space}' was newly created in this run.")
+        else:
+            print(f"Space '{cdm_space}' already existed or an error occurred in its handling.")
 
-        # Define an external_id for the actual file content/object in CDF Files API
-        file_content_external_id = f"{instance_external_id}_content"
+        # file_content_external_id definition removed as it's no longer passed to upload_file_content_to_cdm_instance
+        # instance_mime_type is also no longer passed to that specific function.
+        # file_link_external_id also removed from create_cdm_file_instance call.
 
-        print(f"\nAttempting to create CDM Instance (Node) that will reference the file content...")
-        created_instance_node = create_cdm_file_instance(
+        print(f"\nAttempting to create CDM Instance (Node) of type CogniteFile...")
+        created_instance_node = create_cdm_file_instance( # Call updated
             client=cognite_client,
             space=cdm_space,
-            instance_ext_id=instance_external_id, # External ID of the CDM node
-            file_content_ext_id=file_content_external_id, # External ID for the file in Files API
+            external_id=instance_external_id,
             name=instance_name,
             mime_type=instance_mime_type
+            # file_link_external_id argument removed
         )
 
         if created_instance_node:
-            print(f"CDM Instance Node processed. Details: Space='{created_instance_node.space}', "
+            print(f"CDM Instance (CogniteFile type) processed. Details: Space='{created_instance_node.space}', "
                   f"ExternalID='{created_instance_node.external_id}', Version='{created_instance_node.version}'.")
 
-            print(f"\nAttempting to upload file content and link to the CDM Instance Node...")
-            # Now upload the actual file and link it using source_id
-            uploaded_file_meta = upload_file_content_to_cdm_instance(
+            print(f"\nAttempting to upload file content...")
+            uploaded_file_meta = upload_file_content_to_cdm_instance( # Call signature updated
                 client=cognite_client,
                 local_path=local_file_path,
-                file_content_ext_id=file_content_external_id,
-                cdm_instance_space=created_instance_node.space, # Use space from created node
-                cdm_instance_external_id=created_instance_node.external_id, # Use ext_id from created node
-                mime_type=instance_mime_type # Pass original or guessed mime_type
+                # file_content_ext_id removed
+                cdm_instance_space=created_instance_node.space,
+                cdm_instance_external_id=created_instance_node.external_id
+                # mime_type removed
             )
 
             if uploaded_file_meta:
-                print(f"File content upload and linking successful for '{uploaded_file_meta.external_id}'.")
+                print(f"File content upload successful for file with CDF-assigned external_id: '{uploaded_file_meta.external_id}'.")
             else:
-                print(f"Failed to upload and link file content for file external ID '{file_content_external_id}'.")
+                print(f"Failed to upload file content for file external ID '{file_content_external_id}'.")
         else:
-            print(f"Failed to create CDM Instance Node for external ID '{instance_external_id}'. "
+            print(f"Failed to create CDM Instance (CogniteFile type) for external ID '{instance_external_id}'. "
                   "File content upload will not be attempted.")
 
         print(f"\nScript execution finished. Local file path used: {local_file_path}")
